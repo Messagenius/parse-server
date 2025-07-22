@@ -457,6 +457,9 @@ class ParseLiveQueryServer {
         case 'update':
           this._handleUpdateSubscription(parseWebsocket, request);
           break;
+        case 'resync':
+          this._handleResync(parseWebsocket, request);
+          break;
         case 'unsubscribe':
           this._handleUnsubscribe(parseWebsocket, request);
           break;
@@ -972,6 +975,46 @@ class ParseLiveQueryServer {
   _handleUpdateSubscription(parseWebsocket: any, request: any): any {
     this._handleUnsubscribe(parseWebsocket, request, false);
     this._handleSubscribe(parseWebsocket, request);
+  }
+
+  async _handleResync(parseWebsocket: any, request: any): Promise<any> {
+    if (!Object.prototype.hasOwnProperty.call(parseWebsocket, 'clientId')) {
+      Client.pushError(
+        parseWebsocket,
+        2,
+        'Can not find this client, make sure you connect to server before resyncing'
+      );
+      logger.error('Can not find this client, make sure you connect to server before resyncing');
+      return;
+    }
+    const client = this.clients.get(parseWebsocket.clientId);
+    const className = request.query.className;
+    const parseQuery = new Parse.Query(className);
+    parseQuery.withJSON(request.query);
+    parseQuery.greaterThan('updatedAt', new Date(request.date));
+    parseQuery.ascending('updatedAt');
+    const queryOptions: any = {};
+    if (request.sessionToken) {
+      queryOptions.sessionToken = request.sessionToken;
+    } else if (client.sessionToken) {
+      queryOptions.sessionToken = client.sessionToken;
+    }
+    if (client.hasMasterKey) {
+      queryOptions.useMasterKey = true;
+    }
+    try {
+      const results = await parseQuery.find(queryOptions);
+      results.forEach(obj => {
+        client.pushUpdate(request.requestId, obj.toJSON());
+      });
+    } catch (e) {
+      const error = resolveError(e);
+      Client.pushError(parseWebsocket, error.code, error.message, false, request.requestId);
+      logger.error(
+        `Failed resync on ${className} for session ${request.sessionToken} with:\n Error: ` +
+          JSON.stringify(error)
+      );
+    }
   }
 
   _handleUnsubscribe(parseWebsocket: any, request: any, notifyClient: boolean = true): any {

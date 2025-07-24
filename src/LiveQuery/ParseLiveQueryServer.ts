@@ -988,9 +988,9 @@ class ParseLiveQueryServer {
       return;
     }
     const client = this.clients.get(parseWebsocket.clientId);
-    const className = request.query.className;
+    const { className, ...queryJSON } = request.query;
     const parseQuery = new Parse.Query(className);
-    parseQuery.withJSON(request.query);
+    parseQuery.withJSON(queryJSON);
     parseQuery.greaterThan('updatedAt', new Date(request.date));
     parseQuery.ascending('updatedAt');
     const queryOptions: any = {};

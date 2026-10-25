@@ -9,6 +9,10 @@ declare class ParseLiveQueryServer {
     subscriber: any;
     authCache: any;
     cacheController: any;
+    _fanout: any;
+    _tokenUser: Map<string, any>;
+    _prefilter: any;
+    _dbController: any;
     constructor(server: any, config?: any, parseServerConfig?: any);
     connect(): Promise<void>;
     shutdown(): Promise<void>;
@@ -17,7 +21,12 @@ declare class ParseLiveQueryServer {
     _onAfterDelete(message: any): Promise<void>;
     _onAfterSave(message: any): Promise<void>;
     _onConnect(parseWebsocket: any): void;
-    _matchesSubscription(parseObject: any, subscription: any): boolean;
+    _validateQueryConstraints(where: any): void;
+    _initSpikadCombined(): void;
+    _aclReaders(acl: any): Set<unknown>;
+    _canSkipClient(client: any, requestId: any, currentReaders: any, originalReaders: any, clp: any, query: any): boolean;
+    _scheduleSpikad(clientId: any, client: any, requestId: any, currentReaders: any, originalReaders: any, clp: any, query: any, callback: any): any;
+    _matchesSubscription(parseObject: any, subscription: any, cloned?: boolean): boolean;
     _clearCachedRoles(userId: string): Promise<void>;
     getAuthForSessionToken(sessionToken?: string): Promise<{
         auth?: Auth;

@@ -1,11 +1,11 @@
 {
   "name": "parse-server",
-  "version": "9.10.0",
+  "version": "9.10.0-messagenius.1",
   "description": "An express module providing a Parse-compatible API server",
   "main": "lib/index.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/parse-community/parse-server"
+    "url": "https://github.com/Messagenius/parse-server"
   },
   "files": [
     "bin/",
@@ -136,7 +136,8 @@
     "madge:circular": "node_modules/.bin/madge ./src --circular",
     "benchmark": "cross-env MONGODB_VERSION=8.0.4 MONGODB_TOPOLOGY=standalone mongodb-runner exec -t standalone --version 8.0.4 -- --port 27017 -- npm run benchmark:only",
     "benchmark:only": "node --expose-gc --max-old-space-size=1024 benchmark/performance.js",
-    "benchmark:quick": "cross-env BENCHMARK_ITERATIONS=10 npm run benchmark:only"
+    "benchmark:quick": "cross-env BENCHMARK_ITERATIONS=10 npm run benchmark:only",
+    "test:messagenius": "npm run build && node --test spec/regression/*.test.cjs"
   },
   "types": "types/index.d.ts",
   "engines": {

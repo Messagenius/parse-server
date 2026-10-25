@@ -208,6 +208,7 @@ export interface LiveQueryServerOptions {
     keyPairs?: any;
     websocketTimeout?: number;
     cacheTimeout?: number;
+    authCacheSize?: number;
     logLevel?: string;
     port?: number;
     redisOptions?: any;

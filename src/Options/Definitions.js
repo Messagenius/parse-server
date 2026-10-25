@@ -1018,6 +1018,12 @@ module.exports.LiveQueryServerOptions = {
     env: 'PARSE_LIVE_QUERY_SERVER_APP_ID',
     help: 'This string should match the appId in use by your Parse Server. If you deploy the LiveQuery server alongside Parse Server, the LiveQuery server will try to use the same appId.',
   },
+  authCacheSize: {
+    env: 'PARSE_LIVE_QUERY_SERVER_AUTH_CACHE_SIZE',
+    help: 'Maximum cached LiveQuery authentication promises. Defaults to 10000.',
+    action: parsers.numberParser('authCacheSize'),
+    default: 10000,
+  },
   cacheTimeout: {
     env: 'PARSE_LIVE_QUERY_SERVER_CACHE_TIMEOUT',
     help: "Number in milliseconds. When clients provide the sessionToken to the LiveQuery server, the LiveQuery server will try to fetch its ParseUser's objectId from parse server and store it in the cache. The value defines the duration of the cache. Check the following Security section and our protocol specification for details, defaults to 5 * 1000 ms (5 seconds).",

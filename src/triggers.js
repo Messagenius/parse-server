@@ -70,7 +70,12 @@ function validateClassNameForTriggers(className, type) {
     // TODO: Allow proper documented way of using nested increment ops
     throw 'Only afterSave is allowed on _PushStatus';
   }
-  if ((type === Types.beforeLogin || type === Types.afterLogin || type === Types.beforePasswordResetRequest) && className !== '_User') {
+  if (
+    (type === Types.beforeLogin ||
+      type === Types.afterLogin ||
+      type === Types.beforePasswordResetRequest) &&
+    className !== '_User'
+  ) {
     // TODO: check if upstream code will handle `Error` instance rather
     // than this anti-pattern of throwing strings
     throw 'Only the _User class is allowed for the beforeLogin, afterLogin, and beforePasswordResetRequest triggers';
@@ -527,6 +532,22 @@ export function maybeRunAfterFindTrigger(
       config.logLevels.triggerBeforeSuccess
     );
 
+    // Server-owned capability for the proven no-op base-api User hook.
+    // Query authorization has already run; auth adapters still run afterwards.
+    const rawHook = trigger[Symbol.for('messagenius.userAfterFind.raw.v1')];
+    if (
+      classNameQuery === '_User' &&
+      triggerType === Types.afterFind &&
+      typeof rawHook === 'function' &&
+      !getValidator(triggerType + '.' + classNameQuery, config.applicationId) &&
+      !getValidator(triggerType + '.' + classNameQuery, Parse.applicationId)
+    ) {
+      const rawResult = rawHook(request, objectsInput, Parse);
+      if (rawResult !== null) {
+        return resolve(rawResult);
+      }
+    }
+
     // Convert plain objects to Parse.Object instances for trigger
     request.objects = objectsInput.map(currentObject => {
       if (currentObject instanceof Parse.Object) {
@@ -938,7 +959,9 @@ export function maybeRunTrigger(
   }
   return new Promise(function (resolve, reject) {
     var trigger = getTrigger(parseObject.className, triggerType, config.applicationId);
-    if (!trigger) { return resolve(); }
+    if (!trigger) {
+      return resolve();
+    }
     var request = getRequestObject(
       triggerType,
       auth,
@@ -1118,12 +1141,26 @@ export async function maybeRunFileTrigger(triggerType, fileObject, config, auth)
   return fileObject;
 }
 
-export async function maybeRunGlobalConfigTrigger(triggerType, auth, configObject, originalConfigObject, config, context) {
+export async function maybeRunGlobalConfigTrigger(
+  triggerType,
+  auth,
+  configObject,
+  originalConfigObject,
+  config,
+  context
+) {
   const GlobalConfigClassName = getClassName(Parse.Config);
   const configTrigger = getTrigger(GlobalConfigClassName, triggerType, config.applicationId);
   if (typeof configTrigger === 'function') {
     try {
-      const request = getRequestObject(triggerType, auth, configObject, originalConfigObject, config, context);
+      const request = getRequestObject(
+        triggerType,
+        auth,
+        configObject,
+        originalConfigObject,
+        config,
+        context
+      );
       await maybeRunValidator(request, `${triggerType}.${GlobalConfigClassName}`, auth);
       if (request.skipWithMasterKey) {
         return configObject;

@@ -4,7 +4,7 @@ const general = {
   properties: {
     op: {
       type: 'string',
-      enum: ['connect', 'subscribe', 'unsubscribe', 'update'],
+      enum: ['connect', 'subscribe', 'unsubscribe', 'update', 'resync'],
     },
   },
   required: ['op'],
@@ -136,6 +136,27 @@ const update = {
   additionalProperties: false,
 };
 
+const resync = {
+  title: 'Resync operation schema',
+  type: 'object',
+  properties: {
+    op: 'resync',
+    requestId: {
+      type: 'number',
+    },
+    query: subscribe.properties.query,
+    date: {
+      type: 'string',
+      format: 'date-time',
+    },
+    sessionToken: {
+      type: 'string',
+    },
+  },
+  required: ['op', 'requestId', 'query', 'date'],
+  additionalProperties: false,
+};
+
 const unsubscribe = {
   title: 'Unsubscribe operation schema',
   type: 'object',
@@ -154,6 +175,7 @@ const RequestSchema = {
   connect: connect,
   subscribe: subscribe,
   update: update,
+  resync: resync,
   unsubscribe: unsubscribe,
 };
 

@@ -14,7 +14,11 @@ ACL checks, and fast-path empty predicates. Parse 9 permission checks, protected
 fields and event triggers remain in place for recipients that cannot be skipped.
 
 Authentication cache size is configurable through `authCacheSize` (default
-10000); its TTL remains `cacheTimeout`. `src/LiveQuery/FanoutLimiter.js` limits
+10000); its TTL remains `cacheTimeout`. Cached identity shortcuts are removed
+when the auth LRU disposes an entry (eviction, expiration, deletion or clear).
+Late authentication results cannot repopulate shortcuts for removed promises or
+overwrite a newer authentication for the same token.
+`src/LiveQuery/FanoutLimiter.js` limits
 active callbacks to `MSG_LQ_FANOUT_CONCURRENCY` (default 256), without evicting
 queued events. It does not bound total queue memory. Replaced clients and
 subscriptions cannot receive events queued for their previous identities.

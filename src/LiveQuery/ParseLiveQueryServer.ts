@@ -76,9 +76,15 @@ class ParseLiveQueryServer {
 
     // This auth cache stores the promises for each auth resolution.
     // The main benefit is to be able to reuse the same user / session token resolution.
-    this.authCache = new LRU({
+    this.authCache = new LRU<string, Promise<any>>({
       max: config.authCacheSize || 10000,
       ttl: config.cacheTimeout,
+      dispose: (promise, sessionToken) => {
+        // The identity shortcut must not keep an evicted Auth / User alive.
+        if (this._tokenUser.get(sessionToken)?.promise === promise) {
+          this._tokenUser.delete(sessionToken);
+        }
+      },
     });
     // Initialize websocket server
     this.parseWebSocketServer = new ParseWebSocketServer(
@@ -839,21 +845,26 @@ class ParseLiveQueryServer {
       .then(auth => {
         this._initSpikadCombined();
         const userId = auth && auth.user && auth.user.id;
-        if (userId) {
-          if (this._tokenUser.size >= 50000) { this._tokenUser.clear(); }
+        // Authentication can finish after eviction, invalidation or replacement.
+        // Only the promise still owned by the LRU may populate the shortcut.
+        if (userId && this.authCache.peek(sessionToken) === authPromise) {
           this._tokenUser.set(sessionToken, { userId, promise: authPromise });
         }
         return { auth, userId };
       })
       .catch(error => {
-        this._tokenUser?.delete(sessionToken);
         // There was an error with the session token
         const result: any = {};
         if (error && error.code === Parse.Error.INVALID_SESSION_TOKEN) {
           result.error = error;
-          this.authCache.set(sessionToken, Promise.resolve(result), this.config.cacheTimeout);
-        } else {
-          this.authCache.delete(sessionToken);
+        }
+        // A late failure must not remove or overwrite a newer cached identity.
+        if (this.authCache.peek(sessionToken) === authPromise) {
+          if (result.error) {
+            this.authCache.set(sessionToken, Promise.resolve(result));
+          } else {
+            this.authCache.delete(sessionToken);
+          }
         }
         return result;
       });

@@ -1,4 +1,5 @@
 import tv4 from 'tv4';
+import FanoutLimiter from './FanoutLimiter';
 import Parse from 'parse/node';
 import { Subscription } from './Subscription';
 import { Client } from './Client';
@@ -173,7 +174,7 @@ class ParseLiveQueryServer {
     const readersOriginal = readersCurrent;
     logger.verbose(Parse.applicationId + 'afterDelete is triggered');
 
-    let deletedParseObject = message.currentParseObject.toJSON();
+    const deletedParseObject = message.currentParseObject.toJSON();
     const classLevelPermissions = message.classLevelPermissions;
     const className = deletedParseObject.className;
     logger.verbose('ClassName: %j | ObjectId: %s', className, deletedParseObject.id);
@@ -201,75 +202,94 @@ class ParseLiveQueryServer {
         if (typeof client === 'undefined') {
           continue;
         }
-        requestIds.forEach(async requestId => {
-          if (this._canSkipClient(client, requestId, readersCurrent, readersOriginal, classLevelPermissions, subscription.query)) { return; }
-          // Deep-clone shared object so each concurrent callback works on its own copy
-          let localDeletedParseObject = JSON.parse(JSON.stringify(deletedParseObject));
-          const acl = message.currentParseObject.getACL();
-          // Check CLP
-          const op = this._getCLPOperation(subscription.query);
-          let res: any = {};
-          try {
-            const matchesCLP = await this._matchesCLP(
-              classLevelPermissions,
-              message.currentParseObject,
-              client,
-              requestId,
-              op
-            );
-            if (matchesCLP === false) {
-              return null;
-            }
-            const isMatched = await this._matchesACL(acl, client, requestId);
-            if (!isMatched) {
-              return null;
-            }
-            res = {
-              event: 'delete',
-              sessionToken: client.sessionToken,
-              object: localDeletedParseObject,
-              clients: this.clients.size,
-              subscriptions: this.subscriptions.size,
-              useMasterKey: client.hasMasterKey,
-              installationId: client.installationId,
-              sendEvent: true,
-            };
-            const trigger = getTrigger(className, 'afterEvent', Parse.applicationId);
-            if (trigger) {
-              const auth = await this.getAuthFromClient(client, requestId);
-              if (auth && auth.user) {
-                res.user = auth.user;
+        requestIds.forEach(requestId =>
+          this._scheduleSpikad(
+            clientId,
+            client,
+            requestId,
+            readersCurrent,
+            readersOriginal,
+            classLevelPermissions,
+            subscription.query,
+            async () => {
+              // Deep-clone shared object so each concurrent callback works on its own copy
+              let localDeletedParseObject = JSON.parse(JSON.stringify(deletedParseObject));
+              const acl = message.currentParseObject.getACL();
+              // Check CLP
+              const op = this._getCLPOperation(subscription.query);
+              let res: any = {};
+              try {
+                const matchesCLP = await this._matchesCLP(
+                  classLevelPermissions,
+                  message.currentParseObject,
+                  client,
+                  requestId,
+                  op
+                );
+                if (matchesCLP === false) {
+                  return null;
+                }
+                const isMatched = await this._matchesACL(acl, client, requestId);
+                if (!isMatched) {
+                  return null;
+                }
+                res = {
+                  event: 'delete',
+                  sessionToken: client.sessionToken,
+                  object: localDeletedParseObject,
+                  clients: this.clients.size,
+                  subscriptions: this.subscriptions.size,
+                  useMasterKey: client.hasMasterKey,
+                  installationId: client.installationId,
+                  sendEvent: true,
+                };
+                const trigger = getTrigger(className, 'afterEvent', Parse.applicationId);
+                if (trigger) {
+                  const auth = await this.getAuthFromClient(client, requestId);
+                  if (auth && auth.user) {
+                    res.user = auth.user;
+                  }
+                  if (res.object) {
+                    res.object = Parse.Object.fromJSON(res.object);
+                  }
+                  await runTrigger(trigger, `afterEvent.${className}`, res, auth);
+                }
+                if (!res.sendEvent) {
+                  return;
+                }
+                if (res.object && typeof res.object.toJSON === 'function') {
+                  localDeletedParseObject = toJSONwithObjects(
+                    res.object,
+                    res.object.className || className
+                  );
+                }
+                res.object = localDeletedParseObject;
+                await this._filterSensitiveData(
+                  classLevelPermissions,
+                  res,
+                  client,
+                  requestId,
+                  op,
+                  subscription.query
+                );
+                client.pushDelete(requestId, res.object);
+              } catch (e) {
+                const error = resolveError(e);
+                Client.pushError(
+                  client.parseWebSocket,
+                  error.code,
+                  error.message,
+                  false,
+                  requestId
+                );
+                logger.error(
+                  `Failed running afterLiveQueryEvent on class ${className} for event ${res.event} with session ${res.sessionToken} with:\n Error: ` +
+                    JSON.stringify(error)
+                );
               }
-              if (res.object) {
-                res.object = Parse.Object.fromJSON(res.object);
-              }
-              await runTrigger(trigger, `afterEvent.${className}`, res, auth);
             }
-            if (!res.sendEvent) {
-              return;
-            }
-            if (res.object && typeof res.object.toJSON === 'function') {
-              localDeletedParseObject = toJSONwithObjects(res.object, res.object.className || className);
-            }
-            res.object = localDeletedParseObject;
-            await this._filterSensitiveData(
-              classLevelPermissions,
-              res,
-              client,
-              requestId,
-              op,
-              subscription.query
-            );
-            client.pushDelete(requestId, res.object);
-          } catch (e) {
-            const error = resolveError(e);
-            Client.pushError(client.parseWebSocket, error.code, error.message, false, requestId);
-            logger.error(
-              `Failed running afterLiveQueryEvent on class ${className} for event ${res.event} with session ${res.sessionToken} with:\n Error: ` +
-                JSON.stringify(error)
-            );
-          }
-        });
+          )
+        );
       }
     }
   }
@@ -280,7 +300,8 @@ class ParseLiveQueryServer {
     this._initSpikadCombined();
     const readersCurrent = this._aclReaders(message.currentParseObject.getACL());
     const readersOriginal = message.originalParseObject
-      ? this._aclReaders(message.originalParseObject.getACL()) : readersCurrent;
+      ? this._aclReaders(message.originalParseObject.getACL())
+      : new Set();
     logger.verbose(Parse.applicationId + 'afterSave is triggered');
 
     let originalParseObject = null;
@@ -288,7 +309,7 @@ class ParseLiveQueryServer {
       originalParseObject = message.originalParseObject.toJSON();
     }
     const classLevelPermissions = message.classLevelPermissions;
-    let currentParseObject = message.currentParseObject.toJSON();
+    const currentParseObject = message.currentParseObject.toJSON();
     const className = currentParseObject.className;
     logger.verbose('ClassName: %s | ObjectId: %s', className, currentParseObject.id);
     logger.verbose('Current client number : %d', this.clients.size);
@@ -354,171 +375,199 @@ class ParseLiveQueryServer {
         if (typeof client === 'undefined') {
           continue;
         }
-        requestIds.forEach(async requestId => {
-          if (this._canSkipClient(client, requestId, readersCurrent, readersOriginal, classLevelPermissions, subscription.query)) { return; }
-          // Deep-clone shared objects so each concurrent callback works on its own copy.
-          // Without cloning, _filterSensitiveData's in-place field deletion and afterEvent
-          // trigger modifications corrupt the shared state across concurrent subscribers.
-          let localCurrentParseObject = JSON.parse(JSON.stringify(currentParseObject));
-          let localOriginalParseObject = originalParseObject
-            ? JSON.parse(JSON.stringify(originalParseObject))
-            : null;
-          // Set orignal ParseObject ACL checking promise, if the object does not match
-          // subscription, we do not need to check ACL
-          let originalACLCheckingPromise;
-          if (!isOriginalSubscriptionMatched) {
-            originalACLCheckingPromise = Promise.resolve(false);
-          } else {
-            let originalACL;
-            if (message.originalParseObject) {
-              originalACL = message.originalParseObject.getACL();
-            }
-            originalACLCheckingPromise = this._matchesACL(originalACL, client, requestId);
-          }
-          // Set current ParseObject ACL checking promise, if the object does not match
-          // subscription, we do not need to check ACL
-          let currentACLCheckingPromise;
-          let res: any = {};
-          if (!isCurrentSubscriptionMatched) {
-            currentACLCheckingPromise = Promise.resolve(false);
-          } else {
-            const currentACL = message.currentParseObject.getACL();
-            currentACLCheckingPromise = this._matchesACL(currentACL, client, requestId);
-          }
-          try {
-            const op = this._getCLPOperation(subscription.query);
-            const matchesCLP = await this._matchesCLP(
-              classLevelPermissions,
-              message.currentParseObject,
-              client,
-              requestId,
-              op
-            );
-            if (matchesCLP === false) {
-              return;
-            }
-            const [isOriginalMatched, isCurrentMatched] = await Promise.all([
-              originalACLCheckingPromise,
-              currentACLCheckingPromise,
-            ]);
-            logger.verbose(
-              'Original %j | Current %j | Match: %s, %s, %s, %s | Query: %s',
-              localOriginalParseObject,
-              localCurrentParseObject,
-              isOriginalSubscriptionMatched,
-              isCurrentSubscriptionMatched,
-              isOriginalMatched,
-              isCurrentMatched,
-              subscription.hash
-            );
-            // Decide event type
-            let type;
-            if (isOriginalMatched && isCurrentMatched) {
-              type = 'update';
-            } else if (isOriginalMatched && !isCurrentMatched) {
-              type = 'leave';
-            } else if (!isOriginalMatched && isCurrentMatched) {
-              if (localOriginalParseObject) {
-                type = 'enter';
+        requestIds.forEach(requestId =>
+          this._scheduleSpikad(
+            clientId,
+            client,
+            requestId,
+            readersCurrent,
+            readersOriginal,
+            classLevelPermissions,
+            subscription.query,
+            async () => {
+              // Deep-clone shared objects so each concurrent callback works on its own copy.
+              // Without cloning, _filterSensitiveData's in-place field deletion and afterEvent
+              // trigger modifications corrupt the shared state across concurrent subscribers.
+              let localCurrentParseObject = JSON.parse(JSON.stringify(currentParseObject));
+              let localOriginalParseObject = originalParseObject
+                ? JSON.parse(JSON.stringify(originalParseObject))
+                : null;
+              // Set orignal ParseObject ACL checking promise, if the object does not match
+              // subscription, we do not need to check ACL
+              let originalACLCheckingPromise;
+              if (!isOriginalSubscriptionMatched) {
+                originalACLCheckingPromise = Promise.resolve(false);
               } else {
-                type = 'create';
+                let originalACL;
+                if (message.originalParseObject) {
+                  originalACL = message.originalParseObject.getACL();
+                }
+                originalACLCheckingPromise = this._matchesACL(originalACL, client, requestId);
               }
-            } else {
-              return null;
-            }
-            const watchFieldsChanged = this._checkWatchFields(client, requestId, message);
-            if (!watchFieldsChanged && (type === 'update' || type === 'create')) {
-              return;
-            }
-            // A `leave` or `enter` transition can be caused either by the object's
-            // query match changing (the subscriber keeps read access) or by the
-            // subscriber's ACL read access being revoked or granted in the same save.
-            // In the access-change case the subscriber is not authorized to read the
-            // object state that triggered the transition, so that state must not be
-            // sent over the channel. (CLP read denial is handled earlier by
-            // `_matchesCLP`, which skips the event entirely.)
-            if (type === 'leave') {
-              // The post-update object is readable on a query-mismatch leave but not
-              // on an ACL-loss leave. Only send the post-update body when the
-              // subscriber can still read the current object; otherwise fall back to
-              // the last authorized (original) state, which still carries the objectId.
-              const currentReadable = isCurrentSubscriptionMatched
-                ? false
-                : await this._matchesACL(message.currentParseObject.getACL(), client, requestId);
-              if (!currentReadable) {
-                localCurrentParseObject = JSON.parse(JSON.stringify(localOriginalParseObject));
+              // Set current ParseObject ACL checking promise, if the object does not match
+              // subscription, we do not need to check ACL
+              let currentACLCheckingPromise;
+              let res: any = {};
+              if (!isCurrentSubscriptionMatched) {
+                currentACLCheckingPromise = Promise.resolve(false);
+              } else {
+                const currentACL = message.currentParseObject.getACL();
+                currentACLCheckingPromise = this._matchesACL(currentACL, client, requestId);
               }
-            } else if (type === 'enter') {
-              // The pre-update object was readable on a query-match-gain enter but not
-              // on an ACL-grant enter. Only send the pre-update body as `original`
-              // when the subscriber could read the original object.
-              const originalReadable = isOriginalSubscriptionMatched
-                ? false
-                : await this._matchesACL(message.originalParseObject.getACL(), client, requestId);
-              if (!originalReadable) {
-                localOriginalParseObject = null;
+              try {
+                const op = this._getCLPOperation(subscription.query);
+                const matchesCLP = await this._matchesCLP(
+                  classLevelPermissions,
+                  message.currentParseObject,
+                  client,
+                  requestId,
+                  op
+                );
+                if (matchesCLP === false) {
+                  return;
+                }
+                const [isOriginalMatched, isCurrentMatched] = await Promise.all([
+                  originalACLCheckingPromise,
+                  currentACLCheckingPromise,
+                ]);
+                logger.verbose(
+                  'Original %j | Current %j | Match: %s, %s, %s, %s | Query: %s',
+                  localOriginalParseObject,
+                  localCurrentParseObject,
+                  isOriginalSubscriptionMatched,
+                  isCurrentSubscriptionMatched,
+                  isOriginalMatched,
+                  isCurrentMatched,
+                  subscription.hash
+                );
+                // Decide event type
+                let type;
+                if (isOriginalMatched && isCurrentMatched) {
+                  type = 'update';
+                } else if (isOriginalMatched && !isCurrentMatched) {
+                  type = 'leave';
+                } else if (!isOriginalMatched && isCurrentMatched) {
+                  if (localOriginalParseObject) {
+                    type = 'enter';
+                  } else {
+                    type = 'create';
+                  }
+                } else {
+                  return null;
+                }
+                const watchFieldsChanged = this._checkWatchFields(client, requestId, message);
+                if (!watchFieldsChanged && (type === 'update' || type === 'create')) {
+                  return;
+                }
+                // A `leave` or `enter` transition can be caused either by the object's
+                // query match changing (the subscriber keeps read access) or by the
+                // subscriber's ACL read access being revoked or granted in the same save.
+                // In the access-change case the subscriber is not authorized to read the
+                // object state that triggered the transition, so that state must not be
+                // sent over the channel. (CLP read denial is handled earlier by
+                // `_matchesCLP`, which skips the event entirely.)
+                if (type === 'leave') {
+                  // The post-update object is readable on a query-mismatch leave but not
+                  // on an ACL-loss leave. Only send the post-update body when the
+                  // subscriber can still read the current object; otherwise fall back to
+                  // the last authorized (original) state, which still carries the objectId.
+                  const currentReadable = isCurrentSubscriptionMatched
+                    ? false
+                    : await this._matchesACL(
+                      message.currentParseObject.getACL(),
+                      client,
+                      requestId
+                    );
+                  if (!currentReadable) {
+                    localCurrentParseObject = JSON.parse(JSON.stringify(localOriginalParseObject));
+                  }
+                } else if (type === 'enter') {
+                  // The pre-update object was readable on a query-match-gain enter but not
+                  // on an ACL-grant enter. Only send the pre-update body as `original`
+                  // when the subscriber could read the original object.
+                  const originalReadable = isOriginalSubscriptionMatched
+                    ? false
+                    : await this._matchesACL(
+                      message.originalParseObject.getACL(),
+                      client,
+                      requestId
+                    );
+                  if (!originalReadable) {
+                    localOriginalParseObject = null;
+                  }
+                }
+                res = {
+                  event: type,
+                  sessionToken: client.sessionToken,
+                  object: localCurrentParseObject,
+                  original: localOriginalParseObject,
+                  clients: this.clients.size,
+                  subscriptions: this.subscriptions.size,
+                  useMasterKey: client.hasMasterKey,
+                  installationId: client.installationId,
+                  sendEvent: true,
+                };
+                const trigger = getTrigger(className, 'afterEvent', Parse.applicationId);
+                if (trigger) {
+                  if (res.object) {
+                    res.object = Parse.Object.fromJSON(res.object);
+                  }
+                  if (res.original) {
+                    res.original = Parse.Object.fromJSON(res.original);
+                  }
+                  const auth = await this.getAuthFromClient(client, requestId);
+                  if (auth && auth.user) {
+                    res.user = auth.user;
+                  }
+                  await runTrigger(trigger, `afterEvent.${className}`, res, auth);
+                }
+                if (!res.sendEvent) {
+                  return;
+                }
+                if (res.object && typeof res.object.toJSON === 'function') {
+                  localCurrentParseObject = toJSONwithObjects(
+                    res.object,
+                    res.object.className || className
+                  );
+                }
+                if (res.original && typeof res.original.toJSON === 'function') {
+                  localOriginalParseObject = toJSONwithObjects(
+                    res.original,
+                    res.original.className || className
+                  );
+                }
+                res.object = localCurrentParseObject;
+                res.original = localOriginalParseObject;
+                await this._filterSensitiveData(
+                  classLevelPermissions,
+                  res,
+                  client,
+                  requestId,
+                  op,
+                  subscription.query
+                );
+                const functionName =
+                  'push' + res.event.charAt(0).toUpperCase() + res.event.slice(1);
+                if (client[functionName]) {
+                  client[functionName](requestId, res.object, res.original ?? null);
+                }
+              } catch (e) {
+                const error = resolveError(e);
+                Client.pushError(
+                  client.parseWebSocket,
+                  error.code,
+                  error.message,
+                  false,
+                  requestId
+                );
+                logger.error(
+                  `Failed running afterLiveQueryEvent on class ${className} for event ${res.event} with session ${res.sessionToken} with:\n Error: ` +
+                    JSON.stringify(error)
+                );
               }
             }
-            res = {
-              event: type,
-              sessionToken: client.sessionToken,
-              object: localCurrentParseObject,
-              original: localOriginalParseObject,
-              clients: this.clients.size,
-              subscriptions: this.subscriptions.size,
-              useMasterKey: client.hasMasterKey,
-              installationId: client.installationId,
-              sendEvent: true,
-            };
-            const trigger = getTrigger(className, 'afterEvent', Parse.applicationId);
-            if (trigger) {
-              if (res.object) {
-                res.object = Parse.Object.fromJSON(res.object);
-              }
-              if (res.original) {
-                res.original = Parse.Object.fromJSON(res.original);
-              }
-              const auth = await this.getAuthFromClient(client, requestId);
-              if (auth && auth.user) {
-                res.user = auth.user;
-              }
-              await runTrigger(trigger, `afterEvent.${className}`, res, auth);
-            }
-            if (!res.sendEvent) {
-              return;
-            }
-            if (res.object && typeof res.object.toJSON === 'function') {
-              localCurrentParseObject = toJSONwithObjects(res.object, res.object.className || className);
-            }
-            if (res.original && typeof res.original.toJSON === 'function') {
-              localOriginalParseObject = toJSONwithObjects(
-                res.original,
-                res.original.className || className
-              );
-            }
-            res.object = localCurrentParseObject;
-            res.original = localOriginalParseObject;
-            await this._filterSensitiveData(
-              classLevelPermissions,
-              res,
-              client,
-              requestId,
-              op,
-              subscription.query
-            );
-            const functionName = 'push' + res.event.charAt(0).toUpperCase() + res.event.slice(1);
-            if (client[functionName]) {
-              client[functionName](requestId, res.object, res.original ?? null);
-            }
-          } catch (e) {
-            const error = resolveError(e);
-            Client.pushError(client.parseWebSocket, error.code, error.message, false, requestId);
-            logger.error(
-              `Failed running afterLiveQueryEvent on class ${className} for event ${res.event} with session ${res.sessionToken} with:\n Error: ` +
-                JSON.stringify(error)
-            );
-          }
-        });
+          )
+        );
       }
     }
   }
@@ -619,6 +668,7 @@ class ParseLiveQueryServer {
 
   _initSpikadCombined() {
     if (this._tokenUser) { return; }
+    this._fanout = new FanoutLimiter(Number(process.env.MSG_LQ_FANOUT_CONCURRENCY || 256));
     this._tokenUser = new Map();
     this._prefilter = { skipped: 0, considered: 0, unknown: 0 };
   }
@@ -656,6 +706,30 @@ class ParseLiveQueryServer {
     this._prefilter.skipped++;
     return true;
   }
+  _scheduleSpikad(
+    clientId,
+    client,
+    requestId,
+    currentReaders,
+    originalReaders,
+    clp,
+    query,
+    callback
+  ) {
+    if (this._canSkipClient(client, requestId, currentReaders, originalReaders, clp, query)) { return; }
+    const info = client.getSubscriptionInfo(requestId);
+    return this._fanout.run(() => {
+      // A queued event must not be delivered to a reused requestId or connection.
+      if (
+        this.clients.get(clientId) !== client ||
+        !info ||
+        client.getSubscriptionInfo(requestId) !== info
+      )
+      { return; }
+      return callback();
+    });
+  }
+
   _matchesSubscription(parseObject: any, subscription: any, cloned = false): boolean {
     // Object is undefined or null, not match
     if (!parseObject) {

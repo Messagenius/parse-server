@@ -1,11 +1,11 @@
 {
   "name": "parse-server",
-  "version": "7.5.4",
+  "version": "7.5.4-messagenius.1",
   "description": "An express module providing a Parse-compatible API server",
   "main": "lib/index.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/parse-community/parse-server"
+    "url": "https://github.com/Messagenius/parse-server"
   },
   "files": [
     "bin/",
@@ -137,7 +137,8 @@
     "prettier": "prettier --write {src,spec}/{**/*,*}.js",
     "prepare": "npm run build",
     "postinstall": "node -p 'require(\"./postinstall.js\")()'",
-    "madge:circular": "node_modules/.bin/madge ./src --circular"
+    "madge:circular": "node_modules/.bin/madge ./src --circular",
+    "test:messagenius": "npm run build && node --test spec/regression/*.test.cjs"
   },
   "engines": {
     "node": ">=18.0.0 <19.0.0 || >=19.0.0 <20.0.0 || >=20.0.0 <21.0.0 || >=22.0.0 <23.0.0"

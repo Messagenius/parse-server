@@ -18,7 +18,7 @@ import {
   toJSONwithObjects,
 } from '../triggers';
 import { getAuthForSessionToken, Auth } from '../Auth';
-import { getCacheController, getDatabaseController } from '../Controllers';
+import { getCacheController } from '../Controllers';
 import { LRUCache as LRU } from 'lru-cache';
 import UserRouter from '../Routers/UsersRouter';
 import DatabaseController from '../Controllers/DatabaseController';
@@ -636,7 +636,10 @@ class ParseLiveQueryServer {
       }
       let protectedFields = classLevelPermissions?.protectedFields || [];
       if (!client.hasMasterKey && !Array.isArray(protectedFields)) {
-        protectedFields = getDatabaseController(this.config).addProtectedFields(
+        // Parse 7.5.4's method has no controller state or database access.
+        // Recompute the policy for every recipient; only avoid constructing the adapter.
+        protectedFields = DatabaseController.prototype.addProtectedFields.call(
+          null,
           classLevelPermissions,
           res.object.className,
           query,

@@ -877,6 +877,11 @@ module.exports.LiveQueryServerOptions = {
     help:
       'This string should match the appId in use by your Parse Server. If you deploy the LiveQuery server alongside Parse Server, the LiveQuery server will try to use the same appId.',
   },
+  authCacheSize: {
+    env: 'PARSE_LIVE_QUERY_SERVER_AUTH_CACHE_SIZE',
+    help: 'Maximum cached LiveQuery authentication entries. Defaults to 10000.',
+    action: parsers.numberParser('authCacheSize'),
+  },
   cacheTimeout: {
     env: 'PARSE_LIVE_QUERY_SERVER_CACHE_TIMEOUT',
     help:

@@ -39,6 +39,7 @@ class ParseLiveQueryServer {
     this.clients = new Map();
     this.subscriptions = new Map();
     this.config = config;
+    this._initSpikadCombined();
 
     config.appId = config.appId || Parse.applicationId;
     config.masterKey = config.masterKey || Parse.masterKey;
@@ -66,8 +67,14 @@ class ParseLiveQueryServer {
     // This auth cache stores the promises for each auth resolution.
     // The main benefit is to be able to reuse the same user / session token resolution.
     this.authCache = new LRU({
-      max: 500, // 500 concurrent
+      max: config.authCacheSize || 10000,
       ttl: config.cacheTimeout,
+      dispose: (promise, sessionToken) => {
+        // The identity shortcut must not keep an evicted Auth / User alive.
+        if (this._tokenUser.get(sessionToken)?.promise === promise) {
+          this._tokenUser.delete(sessionToken);
+        }
+      },
     });
     // Initialize websocket server
     this.parseWebSocketServer = new ParseWebSocketServer(
@@ -161,6 +168,9 @@ class ParseLiveQueryServer {
   // Message is the JSON object from publisher after inflated. Message.currentParseObject is the ParseObject after changes.
   // Message.originalParseObject is the original ParseObject.
   async _onAfterDelete(message: any): Promise<void> {
+    this._initSpikadCombined();
+    const readersCurrent = this._aclReaders(message.currentParseObject.getACL());
+    const readersOriginal = readersCurrent;
     logger.verbose(Parse.applicationId + 'afterDelete is triggered');
 
     let deletedParseObject = message.currentParseObject.toJSON();
@@ -192,6 +202,7 @@ class ParseLiveQueryServer {
           continue;
         }
         requestIds.forEach(async requestId => {
+          if (this._canSkipClient(client, requestId, readersCurrent, readersOriginal, classLevelPermissions, subscription.query)) { return; }
           // Deep-clone shared object so each concurrent callback works on its own copy
           let localDeletedParseObject = JSON.parse(JSON.stringify(deletedParseObject));
           const acl = message.currentParseObject.getACL();
@@ -266,6 +277,10 @@ class ParseLiveQueryServer {
   // Message is the JSON object from publisher after inflated. Message.currentParseObject is the ParseObject after changes.
   // Message.originalParseObject is the original ParseObject.
   async _onAfterSave(message: any): Promise<void> {
+    this._initSpikadCombined();
+    const readersCurrent = this._aclReaders(message.currentParseObject.getACL());
+    const readersOriginal = message.originalParseObject
+      ? this._aclReaders(message.originalParseObject.getACL()) : readersCurrent;
     logger.verbose(Parse.applicationId + 'afterSave is triggered');
 
     let originalParseObject = null;
@@ -340,6 +355,7 @@ class ParseLiveQueryServer {
           continue;
         }
         requestIds.forEach(async requestId => {
+          if (this._canSkipClient(client, requestId, readersCurrent, readersOriginal, classLevelPermissions, subscription.query)) { return; }
           // Deep-clone shared objects so each concurrent callback works on its own copy.
           // Without cloning, _filterSensitiveData's in-place field deletion and afterEvent
           // trigger modifications corrupt the shared state across concurrent subscribers.
@@ -601,6 +617,45 @@ class ParseLiveQueryServer {
     });
   }
 
+  _initSpikadCombined() {
+    if (this._tokenUser) { return; }
+    this._tokenUser = new Map();
+    this._prefilter = { skipped: 0, considered: 0, unknown: 0 };
+  }
+  _aclReaders(acl) {
+    if (!acl || acl.getPublicReadAccess()) { return null; }
+    const readers = new Set();
+    for (const id of Object.keys(acl.permissionsById || {})) {
+      if (id.startsWith('role:')) { return null; }
+      if (acl.getReadAccess(id)) { readers.add(id); }
+    }
+    return readers;
+  }
+  _canSkipClient(client, requestId, currentReaders, originalReaders, clp, query) {
+    if (client.hasMasterKey || currentReaders === null || originalReaders === null) { return false; }
+    // Restricted CLPs can generate error frames before ACL evaluation in Parse 7.
+    // Preserve that behavior, including pointer and requiresAuthentication checks.
+    const op = this._getCLPOperation(query);
+    if (clp && clp[op]?.['*'] !== true) { return false; }
+    if (clp?.[op]?.requiresAuthentication || clp?.[op]?.pointerFields || clp?.readUserFields)
+    { return false; }
+    const info = client.getSubscriptionInfo(requestId);
+    if (!info) { return false; }
+    this._prefilter.considered++;
+    // Parse 7 checks BOTH tokens. A missing token has no access; an unresolved or
+    // expired cached token must fall through to the original authorization path.
+    for (const token of new Set([info.sessionToken, client.sessionToken])) {
+      if (!token) { continue; }
+      const known = this._tokenUser.get(token);
+      if (!known || this.authCache.get(token) !== known.promise) {
+        this._prefilter.unknown++;
+        return false;
+      }
+      if (currentReaders.has(known.userId) || originalReaders.has(known.userId)) { return false; }
+    }
+    this._prefilter.skipped++;
+    return true;
+  }
   _matchesSubscription(parseObject: any, subscription: any, cloned = false): boolean {
     // Object is undefined or null, not match
     if (!parseObject) {
@@ -636,7 +691,7 @@ class ParseLiveQueryServer {
     }
   }
 
-  getAuthForSessionToken(sessionToken: ?string): Promise<{ auth: ?Auth, userId: ?string }> {
+  getAuthForSessionToken(sessionToken: ?string): Promise<{ auth?: Auth; userId?: string }> {
     if (!sessionToken) {
       return Promise.resolve({});
     }
@@ -649,16 +704,28 @@ class ParseLiveQueryServer {
       sessionToken: sessionToken,
     })
       .then(auth => {
-        return { auth, userId: auth && auth.user && auth.user.id };
+        this._initSpikadCombined();
+        const userId = auth && auth.user && auth.user.id;
+        // Authentication can finish after eviction, invalidation or replacement.
+        // Only the promise still owned by the LRU may populate the shortcut.
+        if (userId && this.authCache.peek(sessionToken) === authPromise) {
+          this._tokenUser.set(sessionToken, { userId, promise: authPromise });
+        }
+        return { auth, userId };
       })
       .catch(error => {
         // There was an error with the session token
-        const result = {};
+        const result: any = {};
         if (error && error.code === Parse.Error.INVALID_SESSION_TOKEN) {
           result.error = error;
-          this.authCache.set(sessionToken, Promise.resolve(result), this.config.cacheTimeout);
-        } else {
-          this.authCache.delete(sessionToken);
+        }
+        // A late failure must not remove or overwrite a newer cached identity.
+        if (this.authCache.peek(sessionToken) === authPromise) {
+          if (result.error) {
+            this.authCache.set(sessionToken, Promise.resolve(result));
+          } else {
+            this.authCache.delete(sessionToken);
+          }
         }
         return result;
       });
@@ -856,7 +923,7 @@ class ParseLiveQueryServer {
       return true;
     }
 
-    if (await this._verifyACL(acl, clientSessionToken)) {
+    if (clientSessionToken !== subscriptionToken && await this._verifyACL(acl, clientSessionToken)) {
       return true;
     }
 

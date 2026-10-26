@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-26",
+  "baseCommit": "d0fbc892b2944de1e3d1706e3bb53e583325d0ea",
+  "branch": "codex/livequery-http-fairness",
+  "state": "uncommitted candidate; not deployed or published",
+  "node": "v22.14.0",
+  "regressionTests": {
+    "passed": 66,
+    "failed": 0
+  },
+  "build": "passed",
+  "typescript": "passed",
+  "lint": "passed for changed JS and regression tests; TS verified with tsc",
+  "sha256": {
+    "src/LiveQuery/ParseLiveQueryServer.ts": "75af83c1ed87a2b16a67a5d969258a552b32451bf55bf9a047d64bc87c61df13",
+    "src/LiveQuery/FanoutLimiter.js": "2dd312b9266a0f663b7a4d17e77e0865e3742a6b47b12afef1117d6a69bcaff3",
+    "src/LiveQuery/FanoutRecipients.js": "1c813b4487a389463815d531a896ace6950d0fb1503f6a12d65d19dab3581ea8",
+    "src/LiveQuery/Subscription.js": "f8e65b90ffc23299df139ed258d1ac0cdd09c5050addf0acff6f10253dbdd70a",
+    "lib/LiveQuery/ParseLiveQueryServer.js": "38834caf2d02acf05b896f116c64df76eca7ddcea113902b270047abddfdbb56",
+    "lib/LiveQuery/FanoutLimiter.js": "48083d8b4b33120e14a170393a83496242f1e0c3e0d91e524a1284a575e2179e",
+    "lib/LiveQuery/FanoutRecipients.js": "21ce18b05ee5310a9b57069b93f45d5356f7dc7d3f11aef159df4b2caacb3150",
+    "lib/LiveQuery/Subscription.js": "4b2d36c14942580df939422463ddc709aed6212bb1add442455bb8e992b5f59c"
+  }
+}

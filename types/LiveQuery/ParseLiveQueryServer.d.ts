@@ -13,19 +13,27 @@ declare class ParseLiveQueryServer {
     _tokenUser: Map<string, any>;
     _prefilter: any;
     _dbController: any;
+    _metrics: any;
+    _metricsTimer: any;
+    _loopDelay: any;
+    _lqDiagAt?: number;
     constructor(server: any, config?: any, parseServerConfig?: any);
     connect(): Promise<void>;
     shutdown(): Promise<void>;
     _createSubscribers(): void;
     _inflateParseObject(message: any): void;
     _onAfterDelete(message: any): Promise<void>;
+    _afterDeleteCandidates(message: any, cutoff: number): Generator<any, void, unknown>;
     _onAfterSave(message: any): Promise<void>;
+    _afterSaveCandidates(message: any, cutoff: number): Generator<any, void, unknown>;
     _onConnect(parseWebsocket: any): void;
     _validateQueryConstraints(where: any): void;
     _initSpikadCombined(): void;
+    _startMetrics(): void;
+    getMetrics(): any;
     _aclReaders(acl: any): Set<unknown>;
     _canSkipClient(client: any, requestId: any, currentReaders: any, originalReaders: any, clp: any, query: any): boolean;
-    _scheduleSpikad(clientId: any, client: any, requestId: any, currentReaders: any, originalReaders: any, clp: any, query: any, callback: any): any;
+    _scheduleSpikad(clientId: any, client: any, requestId: any, currentReaders: any, originalReaders: any, clp: any, query: any, callback: any, recipient?: any): any;
     _matchesSubscription(parseObject: any, subscription: any, cloned?: boolean): boolean;
     _clearCachedRoles(userId: string): Promise<void>;
     getAuthForSessionToken(sessionToken?: string): Promise<{
@@ -37,7 +45,7 @@ declare class ParseLiveQueryServer {
     _getCLPOperation(query: any): "get" | "find";
     _verifyACL(acl: any, token: string): Promise<boolean>;
     getAuthFromClient(client: any, requestId: number, sessionToken?: string): Promise<Auth>;
-    _checkWatchFields(client: any, requestId: any, message: any): any;
+    _checkWatchFields(client: any, requestId: any, message: any, attributes?: any): any;
     _matchesACL(acl: any, client: any, requestId: number): Promise<boolean>;
     _handleConnect(parseWebsocket: any, request: any): Promise<any>;
     _hasMasterKey(request: any, validKeyPairs: any): boolean;

@@ -1,4 +1,5 @@
 import logger from '../logger';
+import FanoutRecipients from './FanoutRecipients';
 
 export type FlattenedObjectData = { [attr: string]: any };
 export type QueryData = { [attr: string]: any };
@@ -9,12 +10,14 @@ class Subscription {
   className: string;
   hash: string;
   clientRequestIds: Object;
+  fanoutRecipients: FanoutRecipients;
 
   constructor(className: string, query: QueryData, queryHash: string) {
     this.className = className;
     this.query = query;
     this.hash = queryHash;
     this.clientRequestIds = new Map();
+    this.fanoutRecipients = new FanoutRecipients();
   }
 
   addClientSubscription(clientId: number, requestId: number): void {
@@ -26,6 +29,7 @@ class Subscription {
     // leave a residual entry that survives cleanup.
     if (!requestIds.includes(requestId)) {
       requestIds.push(requestId);
+      this.fanoutRecipients.add(clientId, requestId);
     }
   }
 
@@ -42,6 +46,7 @@ class Subscription {
       return;
     }
     requestIds.splice(index, 1);
+    this.fanoutRecipients.remove(clientId, requestId);
     // Delete client reference if it has no subscription
     if (requestIds.length == 0) {
       this.clientRequestIds.delete(clientId);

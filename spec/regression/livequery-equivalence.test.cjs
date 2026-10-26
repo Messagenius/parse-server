@@ -457,6 +457,7 @@ async function runSave(ServerClass, subs, save, clp, setup) {
   while (settled !== pending.length) {
     settled = pending.length;
     await Promise.all(pending);
+    await server._fanout?.waitIdle?.();
     await new Promise(resolve => setImmediate(resolve));
   }
   const sorted = {};

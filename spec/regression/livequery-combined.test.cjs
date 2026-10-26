@@ -177,6 +177,7 @@ test('delete delivers identical protected payloads and errors, with and without 
     server._inflateParseObject(message);
     await server._onAfterDelete(message);
     await Promise.all(pending);
+    await server._fanout?.waitIdle?.();
     return {
       frames: frames.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
       controller: server._dbController,

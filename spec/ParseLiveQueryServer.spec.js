@@ -1961,11 +1961,8 @@ describe('ParseLiveQueryServer', function () {
     };
     subscription.className = query.className;
     subscription.hash = customQueryHashValue || queryHashValue;
-    if (subscription.clientRequestIds && subscription.clientRequestIds.has(clientId)) {
-      subscription.clientRequestIds.get(clientId).push(requestId);
-    } else {
-      subscription.clientRequestIds = new Map([[clientId, [requestId]]]);
-    }
+    // Register through the same API as production so lifetime indexes stay in sync.
+    subscription.addClientSubscription(clientId, requestId);
     subscription.query = query.where;
     return subscription;
   }

@@ -283,20 +283,55 @@ class ParseLiveQueryServer {
       logger.debug('Can not find subscriptions under this class ' + className);
       return;
     }
+    // One deepcopy per object per save instead of one per subscription. matchesQuery
+    // writes to its input in exactly one place: it decodes a {__type: 'Date', iso} value into a
+    // Date instance before every comparison on that key, an idempotent step, so a subscription
+    // evaluated on the shared clone sees what it would see on its own clone. The exception is a
+    // dotted key, which reads into a value without decoding it first ('createdAt.iso' on an
+    // already decoded Date would differ), so a query with a dotted key keeps the per-subscription
+    // clone (third argument false).
+    const hasDottedKey = where =>
+      where !== null &&
+      typeof where === 'object' &&
+      Object.keys(where).some(k =>
+        k === '$or' || k === '$and' || k === '$nor'
+          ? Array.isArray(where[k]) && where[k].some(hasDottedKey)
+          : k.indexOf('.') >= 0
+      );
+    const sharedOriginalParseObject = originalParseObject
+      ? deepcopy(originalParseObject)
+      : null;
+    const sharedCurrentParseObject = deepcopy(currentParseObject);
     for (const subscription of classSubscriptions.values()) {
       let isOriginalSubscriptionMatched;
       let isCurrentSubscriptionMatched;
       try {
-        isOriginalSubscriptionMatched = this._matchesSubscription(
-          originalParseObject,
-          subscription
-        );
-        isCurrentSubscriptionMatched = this._matchesSubscription(
-          currentParseObject,
-          subscription
-        );
+        if (hasDottedKey(subscription.query)) {
+          isOriginalSubscriptionMatched = this._matchesSubscription(
+            originalParseObject,
+            subscription
+          );
+          isCurrentSubscriptionMatched = this._matchesSubscription(
+            currentParseObject,
+            subscription
+          );
+        } else {
+          isOriginalSubscriptionMatched = this._matchesSubscription(
+            sharedOriginalParseObject,
+            subscription,
+            true
+          );
+          isCurrentSubscriptionMatched = this._matchesSubscription(
+            sharedCurrentParseObject,
+            subscription,
+            true
+          );
+        }
       } catch (e) {
         logger.error(`Failed matching subscription for class ${className}: ${e.message}`);
+        continue;
+      }
+      if (!isOriginalSubscriptionMatched && !isCurrentSubscriptionMatched) {
         continue;
       }
       for (const [clientId, requestIds] of _.entries(subscription.clientRequestIds)) {
@@ -566,12 +601,13 @@ class ParseLiveQueryServer {
     });
   }
 
-  _matchesSubscription(parseObject: any, subscription: any): boolean {
+  _matchesSubscription(parseObject: any, subscription: any, cloned = false): boolean {
     // Object is undefined or null, not match
     if (!parseObject) {
       return false;
     }
-    return matchesQuery(deepcopy(parseObject), subscription.query);
+    if (subscription.query && Object.keys(subscription.query).length === 0) { return true; }
+    return matchesQuery(cloned ? parseObject : deepcopy(parseObject), subscription.query);
   }
 
   async _clearCachedRoles(userId: string) {

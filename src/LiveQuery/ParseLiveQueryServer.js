@@ -160,7 +160,7 @@ class ParseLiveQueryServer {
 
   // Message is the JSON object from publisher after inflated. Message.currentParseObject is the ParseObject after changes.
   // Message.originalParseObject is the original ParseObject.
-  async _onAfterDelete(message: any): void {
+  async _onAfterDelete(message: any): Promise<void> {
     logger.verbose(Parse.applicationId + 'afterDelete is triggered');
 
     let deletedParseObject = message.currentParseObject.toJSON();
@@ -176,7 +176,13 @@ class ParseLiveQueryServer {
     }
 
     for (const subscription of classSubscriptions.values()) {
-      const isSubscriptionMatched = this._matchesSubscription(deletedParseObject, subscription);
+      let isSubscriptionMatched;
+      try {
+        isSubscriptionMatched = this._matchesSubscription(deletedParseObject, subscription);
+      } catch (e) {
+        logger.error(`Failed matching subscription for class ${className}: ${e.message}`);
+        continue;
+      }
       if (!isSubscriptionMatched) {
         continue;
       }
@@ -186,18 +192,23 @@ class ParseLiveQueryServer {
           continue;
         }
         requestIds.forEach(async requestId => {
+          // Deep-clone shared object so each concurrent callback works on its own copy
+          let localDeletedParseObject = JSON.parse(JSON.stringify(deletedParseObject));
           const acl = message.currentParseObject.getACL();
           // Check CLP
           const op = this._getCLPOperation(subscription.query);
-          let res = {};
+          let res: any = {};
           try {
-            await this._matchesCLP(
+            const matchesCLP = await this._matchesCLP(
               classLevelPermissions,
               message.currentParseObject,
               client,
               requestId,
               op
             );
+            if (matchesCLP === false) {
+              return null;
+            }
             const isMatched = await this._matchesACL(acl, client, requestId);
             if (!isMatched) {
               return null;
@@ -205,7 +216,7 @@ class ParseLiveQueryServer {
             res = {
               event: 'delete',
               sessionToken: client.sessionToken,
-              object: deletedParseObject,
+              object: localDeletedParseObject,
               clients: this.clients.size,
               subscriptions: this.subscriptions.size,
               useMasterKey: client.hasMasterKey,
@@ -227,8 +238,9 @@ class ParseLiveQueryServer {
               return;
             }
             if (res.object && typeof res.object.toJSON === 'function') {
-              deletedParseObject = toJSONwithObjects(res.object, res.object.className || className);
+              localDeletedParseObject = toJSONwithObjects(res.object, res.object.className || className);
             }
+            res.object = localDeletedParseObject;
             await this._filterSensitiveData(
               classLevelPermissions,
               res,
@@ -237,7 +249,7 @@ class ParseLiveQueryServer {
               op,
               subscription.query
             );
-            client.pushDelete(requestId, deletedParseObject);
+            client.pushDelete(requestId, res.object);
           } catch (e) {
             const error = resolveError(e);
             Client.pushError(client.parseWebSocket, error.code, error.message, false, requestId);
@@ -253,7 +265,7 @@ class ParseLiveQueryServer {
 
   // Message is the JSON object from publisher after inflated. Message.currentParseObject is the ParseObject after changes.
   // Message.originalParseObject is the original ParseObject.
-  async _onAfterSave(message: any): void {
+  async _onAfterSave(message: any): Promise<void> {
     logger.verbose(Parse.applicationId + 'afterSave is triggered');
 
     let originalParseObject = null;
@@ -272,20 +284,34 @@ class ParseLiveQueryServer {
       return;
     }
     for (const subscription of classSubscriptions.values()) {
-      const isOriginalSubscriptionMatched = this._matchesSubscription(
-        originalParseObject,
-        subscription
-      );
-      const isCurrentSubscriptionMatched = this._matchesSubscription(
-        currentParseObject,
-        subscription
-      );
+      let isOriginalSubscriptionMatched;
+      let isCurrentSubscriptionMatched;
+      try {
+        isOriginalSubscriptionMatched = this._matchesSubscription(
+          originalParseObject,
+          subscription
+        );
+        isCurrentSubscriptionMatched = this._matchesSubscription(
+          currentParseObject,
+          subscription
+        );
+      } catch (e) {
+        logger.error(`Failed matching subscription for class ${className}: ${e.message}`);
+        continue;
+      }
       for (const [clientId, requestIds] of _.entries(subscription.clientRequestIds)) {
         const client = this.clients.get(clientId);
         if (typeof client === 'undefined') {
           continue;
         }
         requestIds.forEach(async requestId => {
+          // Deep-clone shared objects so each concurrent callback works on its own copy.
+          // Without cloning, _filterSensitiveData's in-place field deletion and afterEvent
+          // trigger modifications corrupt the shared state across concurrent subscribers.
+          let localCurrentParseObject = JSON.parse(JSON.stringify(currentParseObject));
+          let localOriginalParseObject = originalParseObject
+            ? JSON.parse(JSON.stringify(originalParseObject))
+            : null;
           // Set orignal ParseObject ACL checking promise, if the object does not match
           // subscription, we do not need to check ACL
           let originalACLCheckingPromise;
@@ -301,7 +327,7 @@ class ParseLiveQueryServer {
           // Set current ParseObject ACL checking promise, if the object does not match
           // subscription, we do not need to check ACL
           let currentACLCheckingPromise;
-          let res = {};
+          let res: any = {};
           if (!isCurrentSubscriptionMatched) {
             currentACLCheckingPromise = Promise.resolve(false);
           } else {
@@ -310,21 +336,24 @@ class ParseLiveQueryServer {
           }
           try {
             const op = this._getCLPOperation(subscription.query);
-            await this._matchesCLP(
+            const matchesCLP = await this._matchesCLP(
               classLevelPermissions,
               message.currentParseObject,
               client,
               requestId,
               op
             );
+            if (matchesCLP === false) {
+              return;
+            }
             const [isOriginalMatched, isCurrentMatched] = await Promise.all([
               originalACLCheckingPromise,
               currentACLCheckingPromise,
             ]);
             logger.verbose(
               'Original %j | Current %j | Match: %s, %s, %s, %s | Query: %s',
-              originalParseObject,
-              currentParseObject,
+              localOriginalParseObject,
+              localCurrentParseObject,
               isOriginalSubscriptionMatched,
               isCurrentSubscriptionMatched,
               isOriginalMatched,
@@ -338,7 +367,7 @@ class ParseLiveQueryServer {
             } else if (isOriginalMatched && !isCurrentMatched) {
               type = 'leave';
             } else if (!isOriginalMatched && isCurrentMatched) {
-              if (originalParseObject) {
+              if (localOriginalParseObject) {
                 type = 'enter';
               } else {
                 type = 'create';
@@ -350,11 +379,40 @@ class ParseLiveQueryServer {
             if (!watchFieldsChanged && (type === 'update' || type === 'create')) {
               return;
             }
+            // A `leave` or `enter` transition can be caused either by the object's
+            // query match changing (the subscriber keeps read access) or by the
+            // subscriber's ACL read access being revoked or granted in the same save.
+            // In the access-change case the subscriber is not authorized to read the
+            // object state that triggered the transition, so that state must not be
+            // sent over the channel. (CLP read denial is handled earlier by
+            // `_matchesCLP`, which skips the event entirely.)
+            if (type === 'leave') {
+              // The post-update object is readable on a query-mismatch leave but not
+              // on an ACL-loss leave. Only send the post-update body when the
+              // subscriber can still read the current object; otherwise fall back to
+              // the last authorized (original) state, which still carries the objectId.
+              const currentReadable = isCurrentSubscriptionMatched
+                ? false
+                : await this._matchesACL(message.currentParseObject.getACL(), client, requestId);
+              if (!currentReadable) {
+                localCurrentParseObject = JSON.parse(JSON.stringify(localOriginalParseObject));
+              }
+            } else if (type === 'enter') {
+              // The pre-update object was readable on a query-match-gain enter but not
+              // on an ACL-grant enter. Only send the pre-update body as `original`
+              // when the subscriber could read the original object.
+              const originalReadable = isOriginalSubscriptionMatched
+                ? false
+                : await this._matchesACL(message.originalParseObject.getACL(), client, requestId);
+              if (!originalReadable) {
+                localOriginalParseObject = null;
+              }
+            }
             res = {
               event: type,
               sessionToken: client.sessionToken,
-              object: currentParseObject,
-              original: originalParseObject,
+              object: localCurrentParseObject,
+              original: localOriginalParseObject,
               clients: this.clients.size,
               subscriptions: this.subscriptions.size,
               useMasterKey: client.hasMasterKey,
@@ -379,14 +437,16 @@ class ParseLiveQueryServer {
               return;
             }
             if (res.object && typeof res.object.toJSON === 'function') {
-              currentParseObject = toJSONwithObjects(res.object, res.object.className || className);
+              localCurrentParseObject = toJSONwithObjects(res.object, res.object.className || className);
             }
             if (res.original && typeof res.original.toJSON === 'function') {
-              originalParseObject = toJSONwithObjects(
+              localOriginalParseObject = toJSONwithObjects(
                 res.original,
                 res.original.className || className
               );
             }
+            res.object = localCurrentParseObject;
+            res.original = localOriginalParseObject;
             await this._filterSensitiveData(
               classLevelPermissions,
               res,
@@ -397,7 +457,7 @@ class ParseLiveQueryServer {
             );
             const functionName = 'push' + res.event.charAt(0).toUpperCase() + res.event.slice(1);
             if (client[functionName]) {
-              client[functionName](requestId, currentParseObject, originalParseObject);
+              client[functionName](requestId, res.object, res.original ?? null);
             }
           } catch (e) {
             const error = resolveError(e);
